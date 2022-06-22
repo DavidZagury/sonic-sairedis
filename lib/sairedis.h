@@ -13,6 +13,8 @@ extern "C" {
  */
 #define SAI_REDIS_KEY_CONTEXT_CONFIG              "SAI_REDIS_CONTEXT_CONFIG"
 
+#define SAI_REDIS_SYNC_OPERATION_RESPONSE_MULTIPLIER_TIMEOUT 5
+
 /**
  * @brief Redis enable client.
  *
@@ -43,7 +45,7 @@ extern "C" {
 /**
  * @brief Default synchronous operation response timeout in milliseconds.
  */
-#define SAI_REDIS_DEFAULT_SYNC_OPERATION_RESPONSE_TIMEOUT (60*1000)
+#define SAI_REDIS_DEFAULT_SYNC_OPERATION_RESPONSE_TIMEOUT (SAI_REDIS_SYNC_OPERATION_RESPONSE_MULTIPLIER_TIMEOUT*60*1000)
 
 typedef enum _sai_redis_notify_syncd_t
 {
