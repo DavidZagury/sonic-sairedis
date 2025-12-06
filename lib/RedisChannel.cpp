@@ -142,6 +142,8 @@ sai_status_t RedisChannel::wait(
     swss::Select s;
 
     s.addSelectable(m_getConsumer.get());
+    
+    SWSS_LOG_NOTICE("DEDDY Waiting for %s response (timeout: %lu ms)...", command.c_str(), m_responseTimeoutMs);
 
     while (true)
     {
@@ -158,11 +160,12 @@ sai_status_t RedisChannel::wait(
             const std::string &op = kfvOp(kco);
             const std::string &opkey = kfvKey(kco);
 
-            SWSS_LOG_DEBUG("response: op = %s, key = %s", opkey.c_str(), op.c_str());
+            SWSS_LOG_NOTICE("DEDDY Received response for %s: op=%s, key=%s", command.c_str(), op.c_str(), opkey.c_str());
 
             if (op != command)
             {
-                SWSS_LOG_WARN("got not expected response: %s:%s", opkey.c_str(), op.c_str());
+                SWSS_LOG_WARN("DEDDY got not expected response: %s:%s, expected command: %s, continuing to wait", 
+                              opkey.c_str(), op.c_str(), command.c_str());
 
                 // ignore non response messages
                 continue;
@@ -171,12 +174,14 @@ sai_status_t RedisChannel::wait(
             sai_status_t status;
             sai_deserialize_status(opkey, status);
 
-            SWSS_LOG_DEBUG("%s status: %s", command.c_str(), opkey.c_str());
+            SWSS_LOG_NOTICE("DEDDY %s response received successfully, status: %s", command.c_str(), opkey.c_str());
 
             return status;
         }
 
-        SWSS_LOG_ERROR("SELECT operation result: %s on %s", swss::Select::resultToString(result).c_str(), command.c_str());
+        SWSS_LOG_ERROR("DEDDY SELECT operation result: %s on %s", swss::Select::resultToString(result).c_str(), command.c_str());
+        SWSS_LOG_ERROR("DEDDY Timeout duration was %lu ms - syncd did not respond in time", m_responseTimeoutMs);
+        SWSS_LOG_ERROR("DEDDY Possible causes: 1) syncd main loop stuck/blocked, 2) syncd crashed, 3) syncd not fully initialized");
         break;
     }
 

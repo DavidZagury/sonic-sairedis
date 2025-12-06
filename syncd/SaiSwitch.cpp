@@ -327,9 +327,12 @@ void SaiSwitch::helperCheckLaneMap()
 
     auto laneMap = saiGetHardwareLaneMap();
 
+    SWSS_LOG_NOTICE("DEDDY Checking lane map: SAI has %zu lanes, Redis has %zu lanes", laneMap.size(), redisLaneMap.size());
+
     if (redisLaneMap.size() == 0)
     {
-        SWSS_LOG_INFO("no lanes defined in redis, seems like it is first syncd start");
+        SWSS_LOG_WARN("DEDDY No lanes defined in Redis (size=0) - this can happen if ASIC_DB was flushed or syncd started before swss");
+        SWSS_LOG_WARN("DEDDY This is first syncd start OR a race condition with swss startup");
 
         m_client->saveLaneMap(m_switch_vid, laneMap);
 

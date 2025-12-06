@@ -2116,7 +2116,7 @@ sai_status_t RedisRemoteSaiInterface::notifySyncd(
 
     auto key = sai_serialize(redisNotifySyncd);
 
-    SWSS_LOG_NOTICE("sending syncd: %s", key.c_str());
+    SWSS_LOG_NOTICE("DEDDY sending syncd notification: %s for switch 0x%" PRIx64, key.c_str(), switchId);
 
     // we need to use "GET" channel to be sure that
     // all previous operations were applied, if we don't
@@ -2130,11 +2130,27 @@ sai_status_t RedisRemoteSaiInterface::notifySyncd(
 
     m_recorder->recordNotifySyncd(switchId, redisNotifySyncd);
 
+    SWSS_LOG_NOTICE("DEDDY Writing %s to ASIC_STATE table with NOTIFY command", key.c_str());
     m_communicationChannel->set(key, entry, REDIS_ASIC_STATE_COMMAND_NOTIFY);
-
+    
+    SWSS_LOG_NOTICE("DEDDY Notification written, now waiting for syncd response...");
+    auto start = std::chrono::steady_clock::now();
+    
     auto status = waitForNotifySyncdResponse();
+    
+    auto end = std::chrono::steady_clock::now();
+    auto duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
 
     m_recorder->recordNotifySyncdResponse(status);
+    
+    if (status == SAI_STATUS_SUCCESS)
+    {
+        SWSS_LOG_NOTICE("DEDDYsyncd responded to %s successfully after %ld ms", key.c_str(), duration_ms);
+    }
+    else
+    {
+        SWSS_LOG_ERROR("DEDDY syncd failed to respond to %s after %ld ms, status: %d", key.c_str(), duration_ms, status);
+    }
 
     return status;
 }

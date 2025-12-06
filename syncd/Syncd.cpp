@@ -394,7 +394,12 @@ sai_status_t Syncd::processSingleEvent(
         return processBulkQuadEvent(SAI_COMMON_API_BULK_GET, kco);
 
     if (op == REDIS_ASIC_STATE_COMMAND_NOTIFY)
-        return processNotifySyncd(kco);
+    {
+        SWSS_LOG_NOTICE("DEDDY YNCD processing NOTIFY command: key=%s", key.c_str());
+        auto result = processNotifySyncd(kco);
+        SWSS_LOG_NOTICE("DEDDY SYNCD finished processing NOTIFY command: key=%s, result=%d", key.c_str(), result);
+        return result;
+    }
 
     if (op == REDIS_ASIC_STATE_COMMAND_GET_STATS)
         return processGetStatsEvent(kco);
@@ -4271,6 +4276,12 @@ sai_status_t Syncd::processNotifySyncd(
     auto& key = kfvKey(kco);
     sai_status_t status = SAI_STATUS_SUCCESS;
     auto redisNotifySyncd = sai_deserialize_redis_notify_syncd(key);
+    
+    SWSS_LOG_NOTICE("DEDDY SYNCD RECEIVED notification: %s (enableTempView=%d, veryFirstRun=%d, asicInitViewMode=%d)", 
+                    key.c_str(), 
+                    m_commandLineOptions->m_enableTempView,
+                    m_veryFirstRun,
+                    m_asicInitViewMode);
 
     if (redisNotifySyncd == SAI_REDIS_NOTIFY_SYNCD_INVOKE_DUMP)
     {
@@ -4373,6 +4384,8 @@ sai_status_t Syncd::processNotifySyncd(
 
     if (redisNotifySyncd == SAI_REDIS_NOTIFY_SYNCD_INIT_VIEW)
     {
+        SWSS_LOG_NOTICE("DEDDY Processing INIT_VIEW notification (current asicInitViewMode=%d)", m_asicInitViewMode);
+        
         if (m_asicInitViewMode)
         {
             SWSS_LOG_WARN("syncd is already in asic INIT VIEW mode, but received init again, orchagent restarted before apply?");
@@ -4380,6 +4393,7 @@ sai_status_t Syncd::processNotifySyncd(
 
         m_asicInitViewMode = true;
 
+        SWSS_LOG_NOTICE("DEDDY Clearing temp view for INIT_VIEW...");
         clearTempView();
 
         m_createdInInitView.clear();
@@ -4388,7 +4402,9 @@ sai_status_t Syncd::processNotifySyncd(
 
         SWSS_LOG_WARN("syncd switched to INIT VIEW mode, all op will be saved to TEMP view");
 
+        SWSS_LOG_NOTICE("DEDDY Sending SUCCESS response to orchagent for INIT_VIEW");
         sendNotifyResponse(SAI_STATUS_SUCCESS);
+        SWSS_LOG_NOTICE("DEDDY INIT_VIEW response sent successfully");
     }
     else if (redisNotifySyncd == SAI_REDIS_NOTIFY_SYNCD_APPLY_VIEW)
     {
@@ -4478,9 +4494,11 @@ void Syncd::sendNotifyResponse(
 
     std::vector<swss::FieldValueTuple> entry;
 
-    SWSS_LOG_INFO("sending response: %s", strStatus.c_str());
+    SWSS_LOG_NOTICE("DEDDY Sending notification response to orchagent: %s via GETRESPONSE table", strStatus.c_str());
 
     m_selectableChannel->set(strStatus, entry, REDIS_ASIC_STATE_COMMAND_NOTIFY);
+    
+    SWSS_LOG_NOTICE("DEDDY Response written to GETRESPONSE table successfully");
 }
 
 void Syncd::clearTempView()
@@ -5597,20 +5615,29 @@ void Syncd::run()
     catch(const std::exception &e)
     {
         SWSS_LOG_ERROR("Runtime error during syncd init: %s", e.what());
+        SWSS_LOG_ERROR("DEDDY Syncd initialization FAILED - entering shutdown-wait mode");
+        SWSS_LOG_ERROR("DEDDY Syncd will ONLY process restart_query, NOT INIT_VIEW or other commands!");
+        SWSS_LOG_ERROR("DEDDY If orchagent hasn't started yet, this will cause a DEADLOCK");
 
         sendShutdownRequestAfterException();
 
         s = std::make_shared<swss::Select>();
 
         s->addSelectable(m_restartQuery.get());
+        
+        // ALSO add ASIC state channel so we can respond to INIT_VIEW with error
+        s->addSelectable(m_selectableChannel.get());
 
-        SWSS_LOG_NOTICE("starting main loop, ONLY restart query");
+        SWSS_LOG_NOTICE("starting main loop, ONLY restart query (+ responding to INIT_VIEW with error to avoid deadlock)");
 
         if (m_commandLineOptions->m_disableExitSleep)
             runMainLoop = false;
     }
 
     m_timerWatchdog.setCallback(timerWatchdogCallback);
+    
+    // Track if we're in shutdown-wait mode (only processing restart_query)
+    bool inShutdownWaitMode = (s->getSelectables().size() <= 2);  // Only restart_query + selectableChannel
 
     while (runMainLoop)
     {
@@ -5649,6 +5676,36 @@ void Syncd::run()
                     runMainLoop = false;
                     break;
                 }
+            }
+            else if (inShutdownWaitMode && sel == m_selectableChannel.get())
+            {
+                // We're in shutdown-wait mode but received a command (likely INIT_VIEW from orchagent)
+                // Respond with error to avoid deadlock
+                SWSS_LOG_WARN("DEDDY DEADLOCK PREVENTION: Received command while in shutdown-wait mode");
+                
+                swss::KeyOpFieldsValuesTuple kco;
+                m_selectableChannel->pop(kco);
+                
+                auto& key = kfvKey(kco);
+                auto& op = kfvOp(kco);
+                
+                SWSS_LOG_WARN("DEDDY Command received: op=%s, key=%s", op.c_str(), key.c_str());
+                
+                if (op == REDIS_ASIC_STATE_COMMAND_NOTIFY)
+                {
+                    SWSS_LOG_ERROR("DEDDY Syncd is waiting for shutdown, cannot process NOTIFY: %s", key.c_str());
+                    SWSS_LOG_ERROR("DEDDY Sending FAILURE response to orchagent to break deadlock");
+                    SWSS_LOG_ERROR("DEDDY Orchagent should receive this error and restart syncd");
+                    
+                    sendNotifyResponse(SAI_STATUS_FAILURE);
+                }
+                else
+                {
+                    SWSS_LOG_ERROR("DEDDY Ignoring command %s while in shutdown-wait mode", op.c_str());
+                }
+                
+                continue;
+            }
 
                 // Handle switch pre-shutdown and wait for the final shutdown
                 // event
