@@ -5583,6 +5583,11 @@ void Syncd::run()
     syncd_restart_type_t shutdownType = SYNCD_RESTART_TYPE_COLD;
 
     volatile bool runMainLoop = true;
+    
+    // Track if we're in shutdown-wait mode (init failed, waiting for restart)
+    // Must be declared here so it's accessible in both catch block and main loop
+    bool inShutdownWaitMode = false;
+    
 
     std::shared_ptr<swss::Select> s = std::make_shared<swss::Select>();
 
@@ -5616,17 +5621,16 @@ void Syncd::run()
     {
         SWSS_LOG_ERROR("Runtime error during syncd init: %s", e.what());
         SWSS_LOG_ERROR("DEDDY Syncd initialization FAILED - entering shutdown-wait mode");
-        SWSS_LOG_ERROR("DEDDY Syncd will ONLY process restart_query, NOT INIT_VIEW or other commands!");
-        SWSS_LOG_ERROR("DEDDY If orchagent hasn't started yet, this will cause a DEADLOCK");
+        SWSS_LOG_ERROR("DEDDY Will respond to INIT_VIEW with FAILURE to prevent deadlock");
 
         sendShutdownRequestAfterException();
 
         s = std::make_shared<swss::Select>();
 
         s->addSelectable(m_restartQuery.get());
+        s->addSelectable(m_selectableChannel.get());  // Also listen for commands
         
-        // ALSO add ASIC state channel so we can respond to INIT_VIEW with error
-        s->addSelectable(m_selectableChannel.get());
+        inShutdownWaitMode = true;  // Mark that we're in shutdown-wait mode from init failure
 
         SWSS_LOG_NOTICE("starting main loop, ONLY restart query (+ responding to INIT_VIEW with error to avoid deadlock)");
 
@@ -5635,9 +5639,6 @@ void Syncd::run()
     }
 
     m_timerWatchdog.setCallback(timerWatchdogCallback);
-    
-    // Track if we're in shutdown-wait mode (only processing restart_query)
-    bool inShutdownWaitMode = (s->getSelectables().size() <= 2);  // Only restart_query + selectableChannel
 
     while (runMainLoop)
     {
@@ -5676,36 +5677,6 @@ void Syncd::run()
                     runMainLoop = false;
                     break;
                 }
-            }
-            else if (inShutdownWaitMode && sel == m_selectableChannel.get())
-            {
-                // We're in shutdown-wait mode but received a command (likely INIT_VIEW from orchagent)
-                // Respond with error to avoid deadlock
-                SWSS_LOG_WARN("DEDDY DEADLOCK PREVENTION: Received command while in shutdown-wait mode");
-                
-                swss::KeyOpFieldsValuesTuple kco;
-                m_selectableChannel->pop(kco);
-                
-                auto& key = kfvKey(kco);
-                auto& op = kfvOp(kco);
-                
-                SWSS_LOG_WARN("DEDDY Command received: op=%s, key=%s", op.c_str(), key.c_str());
-                
-                if (op == REDIS_ASIC_STATE_COMMAND_NOTIFY)
-                {
-                    SWSS_LOG_ERROR("DEDDY Syncd is waiting for shutdown, cannot process NOTIFY: %s", key.c_str());
-                    SWSS_LOG_ERROR("DEDDY Sending FAILURE response to orchagent to break deadlock");
-                    SWSS_LOG_ERROR("DEDDY Orchagent should receive this error and restart syncd");
-                    
-                    sendNotifyResponse(SAI_STATUS_FAILURE);
-                }
-                else
-                {
-                    SWSS_LOG_ERROR("DEDDY Ignoring command %s while in shutdown-wait mode", op.c_str());
-                }
-                
-                continue;
-            }
 
                 // Handle switch pre-shutdown and wait for the final shutdown
                 // event
@@ -5778,7 +5749,36 @@ void Syncd::run()
             }
             else if (sel == m_selectableChannel.get())
             {
-                processEvent(*m_selectableChannel.get());
+                // Check if we're in shutdown-wait mode
+                if (inShutdownWaitMode)
+                {
+                    // We're waiting for shutdown but received a command
+                    // Need to respond to avoid deadlock with orchagent
+                    swss::KeyOpFieldsValuesTuple kco;
+                    m_selectableChannel->pop(kco, false);
+                    
+                    auto& op = kfvOp(kco);
+                    auto& key = kfvKey(kco);
+                    
+                    SWSS_LOG_WARN("DEDDY DEADLOCK PREVENTION: Received command while in shutdown-wait mode");
+                    SWSS_LOG_WARN("DEDDY Command: op=%s, key=%s", op.c_str(), key.c_str());
+                    
+                    if (op == REDIS_ASIC_STATE_COMMAND_NOTIFY)
+                    {
+                        SWSS_LOG_ERROR("DEDDY Syncd is waiting for shutdown, cannot process %s", key.c_str());
+                        SWSS_LOG_ERROR("DEDDY Sending FAILURE response to break deadlock");
+                        sendNotifyResponse(SAI_STATUS_FAILURE);
+                    }
+                    else
+                    {
+                        SWSS_LOG_WARN("DEDDY Ignoring non-notify command in shutdown-wait mode");
+                    }
+                }
+                else
+                {
+                    // Normal processing
+                    processEvent(*m_selectableChannel.get());
+                }
             }
             else
             {
@@ -5788,12 +5788,16 @@ void Syncd::run()
         catch(const std::exception &e)
         {
             SWSS_LOG_ERROR("Runtime error: %s", e.what());
+            SWSS_LOG_ERROR("DEDDY Exception in main loop - entering shutdown-wait mode");
 
             sendShutdownRequestAfterException();
 
             s = std::make_shared<swss::Select>();
 
             s->addSelectable(m_restartQuery.get());
+            s->addSelectable(m_selectableChannel.get());  // Also listen for commands
+            
+            inShutdownWaitMode = true;  // Mark that we're in shutdown-wait mode
 
             if (m_commandLineOptions->m_disableExitSleep)
                 runMainLoop = false;
