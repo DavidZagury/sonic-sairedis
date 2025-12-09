@@ -334,6 +334,8 @@ void SaiSwitch::helperCheckLaneMap()
         m_client->saveLaneMap(m_switch_vid, laneMap);
 
         redisLaneMap = laneMap; // copy
+        SWSS_LOG_NOTICE("Saved %zu lanes to Redis, continuing normally", laneMap.size());
+        return;
     }
 
     if (laneMap.size() != redisLaneMap.size())
